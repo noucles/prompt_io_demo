@@ -38,8 +38,10 @@ public class PaymentsControllerTest {
   void createsPayment() {
     UUID id = UUID.randomUUID();
     Instant createdAt = Instant.parse("2026-10-21T12:00:00Z");
+    Instant updatedAt = Instant.parse("2026-10-21T12:00:00Z");
     when(paymentServiceMock.create("user-1", 1050L, "key-1"))
-        .thenReturn(new Payment(id, "user-1", 1050L, PaymentStatus.PENDING, createdAt, "key-1"));
+        .thenReturn(
+            new Payment(id, "user-1", 1050L, PaymentStatus.PENDING, createdAt, "key-1", updatedAt));
 
     var result =
         mvc.post()

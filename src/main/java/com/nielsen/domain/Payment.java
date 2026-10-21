@@ -9,4 +9,5 @@ public record Payment(
     long amount,
     PaymentStatus status,
     Instant createdAt,
-    String idempotencyKey) {}
+    String idempotencyKey,
+    Instant updatedAt) {}

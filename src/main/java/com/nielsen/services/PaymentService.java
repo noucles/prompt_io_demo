@@ -11,6 +11,12 @@ public class PaymentService {
 
   public Payment create(String userId, long amount, String idempotencyKey) {
     return new Payment(
-        UUID.randomUUID(), userId, amount, PaymentStatus.PENDING, Instant.now(), idempotencyKey);
+        UUID.randomUUID(),
+        userId,
+        amount,
+        PaymentStatus.PENDING,
+        Instant.now(),
+        idempotencyKey,
+        Instant.now());
   }
 }
