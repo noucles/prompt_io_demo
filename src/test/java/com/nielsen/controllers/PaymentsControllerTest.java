@@ -1,0 +1,143 @@
+package com.nielsen.controllers;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.params.provider.Arguments.argumentSet;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.nielsen.domain.Payment;
+import com.nielsen.domain.PaymentStatus;
+import com.nielsen.services.PaymentService;
+import java.time.Instant;
+import java.util.UUID;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.assertj.MockMvcTester;
+
+@WebMvcTest(PaymentsController.class)
+public class PaymentsControllerTest {
+  private static final String VALID_BODY =
+      """
+      {"userId": "user-1", "amount": 1050}
+      """;
+  @MockitoBean PaymentService paymentServiceMock;
+  @Autowired MockMvcTester mvc;
+
+  @Test
+  void createsPayment() {
+    UUID id = UUID.randomUUID();
+    Instant createdAt = Instant.parse("2026-10-21T12:00:00Z");
+    when(paymentServiceMock.create("user-1", 1050L, "key-1"))
+        .thenReturn(new Payment(id, "user-1", 1050L, PaymentStatus.PENDING, createdAt, "key-1"));
+
+    var result =
+        mvc.post()
+            .uri("/payments")
+            .header("Idempotency-Key", "key-1")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(VALID_BODY)
+            .exchange();
+
+    assertThat(result).hasStatus(HttpStatus.CREATED);
+    assertThat(result).bodyJson().extractingPath("$.id").isEqualTo(id.toString());
+    assertThat(result).bodyJson().extractingPath("$.userId").isEqualTo("user-1");
+    assertThat(result).bodyJson().extractingPath("$.amount").isEqualTo(1050);
+    assertThat(result).bodyJson().extractingPath("$.status").isEqualTo("PENDING");
+    assertThat(result).bodyJson().extractingPath("$.createdAt").isEqualTo("2026-10-21T12:00:00Z");
+  }
+
+  @Test
+  void rejectsMissingIdempotencyKey() {
+    assertThat(
+            mvc.post().uri("/payments").contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+        .hasStatus(HttpStatus.BAD_REQUEST)
+        .hasContentType(MediaType.APPLICATION_PROBLEM_JSON);
+
+    verify(paymentServiceMock, never()).create(any(), anyLong(), any());
+  }
+
+  @Test
+  void rejectsBlankIdempotencyKey() {
+    assertThat(
+            mvc.post()
+                .uri("/payments")
+                .header("Idempotency-Key", "  ")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(VALID_BODY))
+        .hasStatus(HttpStatus.BAD_REQUEST);
+
+    verify(paymentServiceMock, never()).create(any(), anyLong(), any());
+  }
+
+  @Test
+  void rejectsOversizedIdempotencyKey() {
+    assertThat(
+            mvc.post()
+                .uri("/payments")
+                .header("Idempotency-Key", "k".repeat(256))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(VALID_BODY))
+        .hasStatus(HttpStatus.BAD_REQUEST);
+
+    verify(paymentServiceMock, never()).create(any(), anyLong(), any());
+  }
+
+  @ParameterizedTest
+  @MethodSource("invalidBodies")
+  void rejectsInvalidBody(String body) {
+    assertThat(
+            mvc.post()
+                .uri("/payments")
+                .header("Idempotency-Key", "key-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body))
+        .hasStatus(HttpStatus.BAD_REQUEST)
+        .hasContentType(MediaType.APPLICATION_PROBLEM_JSON);
+
+    verify(paymentServiceMock, never()).create(any(), anyLong(), any());
+  }
+
+  static Stream<Arguments> invalidBodies() {
+    return Stream.of(
+        argumentSet(
+            "zero amount",
+            """
+            {"userId": "user-1", "amount": 0}"""),
+        argumentSet(
+            "negative amount",
+            """
+            {"userId": "user-1", "amount": -100}"""),
+        argumentSet(
+            "missing amount",
+            """
+            {"userId": "user-1"}"""),
+        argumentSet(
+            "missing userId",
+            """
+            {"amount": 1050}"""),
+        argumentSet(
+            "blank userId",
+            """
+            {"userId": "  ", "amount": 1050}"""),
+        argumentSet(
+            "oversized userId",
+            """
+            {"userId": "%s", "amount": 1050}"""
+                .formatted("u".repeat(65))),
+        argumentSet(
+            "malformed JSON",
+            """
+            {"userId": "user-1", "amount": }"""));
+  }
+}
