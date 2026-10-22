@@ -19,6 +19,8 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -124,6 +126,37 @@ class PaymentServiceTest {
       assertThat(eventCount()).isEqualTo(1L);
       verify(outbox, times(1)).insert(any());
     }
+  }
+
+  @Test
+  void concurrentDuplicateReplaysPaymentAfterCompetingInsertCommits() throws Exception {
+    var first = pendingPayment();
+
+    var replay = createWhileConflictingInsertIsOpen(first, false);
+
+    assertThat(replay).isEqualTo(first);
+    assertThat(repository.findById(first.id())).contains(first);
+    assertThat(jdbcClient.sql("SELECT count(*) FROM payments").query(Long.class).single())
+        .isEqualTo(1L);
+    verify(processor, never()).charge(any(), anyString(), anyLong());
+    assertThat(eventCount()).isZero();
+  }
+
+  @Test
+  void concurrentDuplicateCreatesAndChargesOnceAfterCompetingInsertRollsBack() throws Exception {
+    var first = pendingPayment();
+
+    var created = createWhileConflictingInsertIsOpen(first, true);
+
+    assertThat(created.id()).isNotEqualTo(first.id());
+    assertThat(created.status()).isEqualTo(PaymentStatus.SUCCEEDED);
+    assertThat(repository.findById(first.id())).isEmpty();
+    assertThat(repository.findByIdempotencyKey(first.idempotencyKey())).contains(created);
+    assertThat(jdbcClient.sql("SELECT count(*) FROM payments").query(Long.class).single())
+        .isEqualTo(1L);
+    verify(processor, times(1)).charge(any(), anyString(), anyLong());
+    verify(processor).charge(created.id(), first.userId(), first.amount());
+    assertEvent(created, PaymentEvent.Type.PAYMENT_SUCCEEDED);
   }
 
   @Test
@@ -279,6 +312,68 @@ class PaymentServiceTest {
   @Test
   void unknownIdReturnsEmpty() {
     assertThat(service.findById(UUID.randomUUID())).isEmpty();
+  }
+
+  private Payment pendingPayment() {
+    Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+    return new Payment(
+        UUID.randomUUID(),
+        "user-1",
+        1050L,
+        PaymentStatus.PENDING,
+        now,
+        "racing-key",
+        now,
+        null,
+        null);
+  }
+
+  private Payment createWhileConflictingInsertIsOpen(Payment first, boolean rollBack)
+      throws Exception {
+    try (var executor = Executors.newSingleThreadExecutor()) {
+      // Thread A is the test thread; only its insert belongs to this transaction.
+      var competingRequest =
+          transactionTemplate.execute(
+              transaction -> {
+                assertThat(repository.insertIfAbsent(first)).isTrue();
+                int blockingPid =
+                    jdbcClient.sql("SELECT pg_backend_pid()").query(Integer.class).single();
+                var request =
+                    executor.submit(
+                        () ->
+                            service.create(first.userId(), first.amount(), first.idempotencyKey()));
+                // Observe actual contention before allowing A to commit or roll back.
+                awaitBlockedInsert(blockingPid);
+                if (rollBack) {
+                  transaction.setRollbackOnly();
+                }
+                return request;
+              });
+      assertThat(competingRequest).isNotNull();
+      return competingRequest.get(10, TimeUnit.SECONDS);
+    }
+  }
+
+  private void awaitBlockedInsert(int blockingPid) {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    do {
+      boolean blocked =
+          jdbcClient
+              .sql(
+                  """
+              SELECT EXISTS (
+                  SELECT 1 FROM pg_stat_activity
+                  WHERE :blockingPid = ANY(pg_blocking_pids(pid))
+              )
+              """)
+              .param("blockingPid", blockingPid)
+              .query(Boolean.class)
+              .single();
+      if (blocked) {
+        return;
+      }
+    } while (System.nanoTime() < deadline);
+    throw new AssertionError("Competing insert did not wait for the uncommitted payment");
   }
 
   private long eventCount() {
