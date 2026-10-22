@@ -1,14 +1,10 @@
-package com.nielsen.services;
+package com.nielsen.payment;
 
-import com.nielsen.domain.IdempotencyKeyConflictException;
-import com.nielsen.domain.Payment;
-import com.nielsen.domain.PaymentStatus;
 import com.nielsen.outbox.OutboxRepository;
 import com.nielsen.outbox.PaymentEvent;
 import com.nielsen.processor.PaymentProcessor;
 import com.nielsen.processor.ProcessorResult;
 import com.nielsen.processor.ProcessorUnavailableException;
-import com.nielsen.repository.PaymentRepository;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Optional;

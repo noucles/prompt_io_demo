@@ -1,7 +1,5 @@
-package com.nielsen.repository;
+package com.nielsen.payment;
 
-import com.nielsen.domain.Payment;
-import com.nielsen.domain.PaymentStatus;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;

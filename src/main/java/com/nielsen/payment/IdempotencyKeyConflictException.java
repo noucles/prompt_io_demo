@@ -1,4 +1,4 @@
-package com.nielsen.domain;
+package com.nielsen.payment;
 
 public class IdempotencyKeyConflictException extends RuntimeException {
   public IdempotencyKeyConflictException() {

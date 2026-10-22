@@ -1,4 +1,4 @@
-package com.nielsen.dto;
+package com.nielsen.payment;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;

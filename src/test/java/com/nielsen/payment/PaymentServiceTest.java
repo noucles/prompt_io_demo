@@ -1,4 +1,4 @@
-package com.nielsen.services;
+package com.nielsen.payment;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -12,13 +12,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.nielsen.TestcontainersConfiguration;
-import com.nielsen.domain.IdempotencyKeyConflictException;
-import com.nielsen.domain.Payment;
-import com.nielsen.domain.PaymentStatus;
 import com.nielsen.outbox.OutboxRepository;
 import com.nielsen.outbox.PaymentEvent;
 import com.nielsen.processor.SimulatedPaymentProcessor;
-import com.nielsen.repository.PaymentRepository;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;

@@ -1,11 +1,9 @@
-package com.nielsen.repository;
+package com.nielsen.payment;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.nielsen.TestcontainersConfiguration;
-import com.nielsen.domain.Payment;
-import com.nielsen.domain.PaymentStatus;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.UUID;

@@ -1,4 +1,4 @@
-package com.nielsen.controllers;
+package com.nielsen.payment;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.params.provider.Arguments.argumentSet;
@@ -8,10 +8,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.nielsen.domain.IdempotencyKeyConflictException;
-import com.nielsen.domain.Payment;
-import com.nielsen.domain.PaymentStatus;
-import com.nielsen.services.PaymentService;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;

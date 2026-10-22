@@ -1,7 +1,5 @@
-package com.nielsen.dto;
+package com.nielsen.payment;
 
-import com.nielsen.domain.Payment;
-import com.nielsen.domain.PaymentStatus;
 import java.time.Instant;
 import java.util.UUID;
 
