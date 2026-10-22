@@ -36,29 +36,52 @@ public class PaymentsControllerTest {
   @MockitoBean PaymentService paymentServiceMock;
   @Autowired MockMvcTester mvc;
 
-  @Test
-  void createsPayment() {
+  @ParameterizedTest
+  @MethodSource("processorOutcomes")
+  void createsPayment(
+      long amount, PaymentStatus status, String processorReference, String failureReason) {
     UUID id = UUID.randomUUID();
     Instant createdAt = Instant.parse("2026-10-21T12:00:00Z");
     Instant updatedAt = Instant.parse("2026-10-21T12:00:00Z");
-    when(paymentServiceMock.create("user-1", 1050L, "key-1"))
+    when(paymentServiceMock.create("user-1", amount, "key-1"))
         .thenReturn(
-            new Payment(id, "user-1", 1050L, PaymentStatus.PENDING, createdAt, "key-1", updatedAt));
+            new Payment(
+                id,
+                "user-1",
+                amount,
+                status,
+                createdAt,
+                "key-1",
+                updatedAt,
+                processorReference,
+                failureReason));
 
     var result =
         mvc.post()
             .uri("/payments")
             .header("Idempotency-Key", "key-1")
             .contentType(MediaType.APPLICATION_JSON)
-            .content(VALID_BODY)
+            .content("{\"userId\": \"user-1\", \"amount\": %d}".formatted(amount))
             .exchange();
 
     assertThat(result).hasStatus(HttpStatus.CREATED);
     assertThat(result).bodyJson().extractingPath("$.id").isEqualTo(id.toString());
     assertThat(result).bodyJson().extractingPath("$.userId").isEqualTo("user-1");
-    assertThat(result).bodyJson().extractingPath("$.amount").isEqualTo(1050);
-    assertThat(result).bodyJson().extractingPath("$.status").isEqualTo("PENDING");
+    assertThat(result).bodyJson().extractingPath("$.amount").isEqualTo((int) amount);
+    assertThat(result).bodyJson().extractingPath("$.status").isEqualTo(status.name());
     assertThat(result).bodyJson().extractingPath("$.createdAt").isEqualTo("2026-10-21T12:00:00Z");
+    assertThat(result)
+        .bodyJson()
+        .extractingPath("$.processorReference")
+        .isEqualTo(processorReference);
+    assertThat(result).bodyJson().extractingPath("$.failureReason").isEqualTo(failureReason);
+  }
+
+  static Stream<Arguments> processorOutcomes() {
+    return Stream.of(
+        argumentSet("approved", 1050L, PaymentStatus.SUCCEEDED, "sim_reference", null),
+        argumentSet("declined", 1001L, PaymentStatus.FAILED, null, "insufficient_funds"),
+        argumentSet("unavailable", 1002L, PaymentStatus.PENDING, null, null));
   }
 
   @Test
@@ -100,7 +123,16 @@ public class PaymentsControllerTest {
     UUID id = UUID.randomUUID();
     Instant createdAt = Instant.parse("2026-10-21T12:00:00Z");
     var payment =
-        new Payment(id, "user-1", 1050L, PaymentStatus.SUCCEEDED, createdAt, "key-1", createdAt);
+        new Payment(
+            id,
+            "user-1",
+            1050L,
+            PaymentStatus.SUCCEEDED,
+            createdAt,
+            "key-1",
+            createdAt,
+            "sim_reference",
+            null);
     when(paymentServiceMock.findById(id)).thenReturn(Optional.of(payment));
 
     var result = mvc.get().uri("/payments/{id}", id).exchange();
@@ -111,6 +143,8 @@ public class PaymentsControllerTest {
     assertThat(result).bodyJson().extractingPath("$.amount").isEqualTo(1050);
     assertThat(result).bodyJson().extractingPath("$.status").isEqualTo("SUCCEEDED");
     assertThat(result).bodyJson().extractingPath("$.createdAt").isEqualTo("2026-10-21T12:00:00Z");
+    assertThat(result).bodyJson().extractingPath("$.processorReference").isEqualTo("sim_reference");
+    assertThat(result).bodyJson().extractingPath("$.failureReason").isNull();
   }
 
   @Test
@@ -120,7 +154,15 @@ public class PaymentsControllerTest {
     when(paymentServiceMock.create("user-1", 1050L, "key-1"))
         .thenReturn(
             new Payment(
-                id, "user-1", 1050L, PaymentStatus.SUCCEEDED, createdAt, "key-1", createdAt));
+                id,
+                "user-1",
+                1050L,
+                PaymentStatus.SUCCEEDED,
+                createdAt,
+                "key-1",
+                createdAt,
+                "sim_reference",
+                null));
 
     var result =
         mvc.post()

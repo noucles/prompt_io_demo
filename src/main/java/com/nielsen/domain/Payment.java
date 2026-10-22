@@ -10,4 +10,6 @@ public record Payment(
     PaymentStatus status,
     Instant createdAt,
     String idempotencyKey,
-    Instant updatedAt) {}
+    Instant updatedAt,
+    String processorReference,
+    String failureReason) {}

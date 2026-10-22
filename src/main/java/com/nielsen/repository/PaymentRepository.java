@@ -4,6 +4,7 @@ import com.nielsen.domain.Payment;
 import com.nielsen.domain.PaymentStatus;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -14,25 +15,8 @@ import org.springframework.stereotype.Repository;
 
 @Repository
 public class PaymentRepository {
-  private static final String ID_COLUMN = "id";
-  private static final String IDEMPOTENCY_KEY_COLUMN = "idempotency_key";
-  private static final String USER_ID_COLUMN = "user_id";
-  private static final String AMOUNT_COLUMN = "amount";
-  private static final String STATUS_COLUMN = "status";
-  private static final String CREATED_AT_COLUMN = "created_at";
-  private static final String UPDATED_AT_COLUMN = "updated_at";
-
   private static final String PAYMENT_COLUMNS =
-      String.join(
-          ", ",
-          ID_COLUMN,
-          IDEMPOTENCY_KEY_COLUMN,
-          USER_ID_COLUMN,
-          AMOUNT_COLUMN,
-          STATUS_COLUMN,
-          CREATED_AT_COLUMN,
-          UPDATED_AT_COLUMN);
-  private static final String SELECT_PAYMENTS = "SELECT " + PAYMENT_COLUMNS + " FROM payments";
+      "id, idempotency_key, user_id, amount, status, created_at, updated_at, processor_reference, failure_reason";
 
   private final JdbcClient jdbcClient;
 
@@ -44,13 +28,13 @@ public class PaymentRepository {
     var result =
         jdbcClient
             .sql(
-                "INSERT INTO payments ("
-                    + PAYMENT_COLUMNS
-                    + ") "
-                    + "VALUES (:id, :idempotencyKey, :userId, :amount, :status, :createdAt, :updatedAt) "
-                    + "ON CONFLICT ("
-                    + IDEMPOTENCY_KEY_COLUMN
-                    + ") DO NOTHING")
+                """
+                INSERT INTO payments (%s)
+                VALUES (:id, :idempotencyKey, :userId, :amount, :status, :createdAt, :updatedAt,
+                        :processorReference, :failureReason)
+                ON CONFLICT (idempotency_key) DO NOTHING
+                """
+                    .formatted(PAYMENT_COLUMNS))
             .param("id", payment.id())
             .param("userId", payment.userId())
             .param("idempotencyKey", payment.idempotencyKey())
@@ -58,6 +42,8 @@ public class PaymentRepository {
             .param("status", payment.status().name())
             .param("createdAt", toDb(payment.createdAt()))
             .param("updatedAt", toDb(payment.updatedAt()))
+            .param("processorReference", payment.processorReference(), Types.VARCHAR)
+            .param("failureReason", payment.failureReason(), Types.VARCHAR)
             .update();
 
     return result == 1;
@@ -65,15 +51,50 @@ public class PaymentRepository {
 
   public Optional<Payment> findById(UUID id) {
     return jdbcClient
-        .sql(SELECT_PAYMENTS + " WHERE " + ID_COLUMN + " = :id")
+        .sql(
+            """
+            SELECT %s
+            FROM payments
+            WHERE id = :id
+            """
+                .formatted(PAYMENT_COLUMNS))
         .param("id", id)
         .query(this::mapRow)
         .optional();
   }
 
+  public boolean completeIfPending(
+      UUID id,
+      PaymentStatus status,
+      String processorReference,
+      String failureReason,
+      Instant updatedAt) {
+    return jdbcClient
+            .sql(
+                """
+                UPDATE payments
+                SET status = :status, processor_reference = :processorReference,
+                    failure_reason = :failureReason, updated_at = :updatedAt
+                WHERE id = :id AND status = 'PENDING'
+                """)
+            .param("id", id)
+            .param("status", status.name())
+            .param("processorReference", processorReference, Types.VARCHAR)
+            .param("failureReason", failureReason, Types.VARCHAR)
+            .param("updatedAt", toDb(updatedAt))
+            .update()
+        == 1;
+  }
+
   public Optional<Payment> findByIdempotencyKey(String idempotencyKey) {
     return jdbcClient
-        .sql(SELECT_PAYMENTS + " WHERE " + IDEMPOTENCY_KEY_COLUMN + " = :idempotencyKey")
+        .sql(
+            """
+            SELECT %s
+            FROM payments
+            WHERE idempotency_key = :idempotencyKey
+            """
+                .formatted(PAYMENT_COLUMNS))
         .param("idempotencyKey", idempotencyKey)
         .query(this::mapRow)
         .optional();
@@ -81,13 +102,15 @@ public class PaymentRepository {
 
   private Payment mapRow(ResultSet rs, int rowNum) throws SQLException {
     return new Payment(
-        rs.getObject(ID_COLUMN, UUID.class),
-        rs.getString(USER_ID_COLUMN),
-        rs.getLong(AMOUNT_COLUMN),
-        PaymentStatus.valueOf(rs.getString(STATUS_COLUMN)),
-        instantFrom(rs, CREATED_AT_COLUMN),
-        rs.getString(IDEMPOTENCY_KEY_COLUMN),
-        instantFrom(rs, UPDATED_AT_COLUMN));
+        rs.getObject("id", UUID.class),
+        rs.getString("user_id"),
+        rs.getLong("amount"),
+        PaymentStatus.valueOf(rs.getString("status")),
+        instantFrom(rs, "created_at"),
+        rs.getString("idempotency_key"),
+        instantFrom(rs, "updated_at"),
+        rs.getString("processor_reference"),
+        rs.getString("failure_reason"));
   }
 
   private static OffsetDateTime toDb(Instant instant) {
