@@ -34,22 +34,40 @@ public class OutboxRepository {
   }
 
   /** Must be called inside the transaction that applies and marks the event processed. */
-  public Optional<ClaimedEvent> claimNext() {
+  public Optional<ClaimedEvent> claimNext(int maxAttempts) {
     return jdbcClient
         .sql(
             """
             SELECT id, payload FROM payment_events
-            WHERE processed_at IS NULL
-            ORDER BY created_at
+            WHERE processed_at IS NULL AND attempts < :maxAttempts
+            ORDER BY attempts, created_at
             LIMIT 1
             FOR UPDATE SKIP LOCKED
             """)
+        .param("maxAttempts", maxAttempts)
         .query(
             (rs, rowNum) ->
-                new ClaimedEvent(
-                    rs.getObject("id", UUID.class),
-                    jsonMapper.readValue(rs.getString("payload"), PaymentEvent.class)))
+                new ClaimedEvent(rs.getObject("id", UUID.class), rs.getString("payload")))
         .optional();
+  }
+
+  /**
+   * Called after the processing transaction has rolled back, so the failure is committed
+   * separately.
+   */
+  public int recordFailure(UUID eventId, String error) {
+    return jdbcClient
+        .sql(
+            """
+            UPDATE payment_events
+            SET attempts = attempts + 1, last_error = LEFT(:error, 1000)
+            WHERE id = :eventId
+            RETURNING attempts
+            """)
+        .param("eventId", eventId)
+        .param("error", error)
+        .query(Integer.class)
+        .single();
   }
 
   public void markProcessed(UUID eventId, Instant processedAt) {

@@ -8,9 +8,11 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.nielsen.TestcontainersConfiguration;
+import com.nielsen.ledger.LedgerEventWorker.ProcessResult;
 import com.nielsen.outbox.OutboxRepository;
 import com.nielsen.outbox.PaymentEvent;
 import com.nielsen.processor.SimulatedPaymentProcessor;
@@ -25,6 +27,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
 import org.springframework.boot.jackson.autoconfigure.JacksonAutoConfiguration;
 import org.springframework.boot.jdbc.test.autoconfigure.JdbcTest;
@@ -37,7 +40,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.json.JsonMapper;
 
-@JdbcTest
+@JdbcTest(properties = "outbox.worker.max-attempts=3")
 @ImportAutoConfiguration(JacksonAutoConfiguration.class)
 @Import({
   TestcontainersConfiguration.class,
@@ -58,6 +61,9 @@ class LedgerEventWorkerTest {
   @Autowired TransactionTemplate transactionTemplate;
   @MockitoSpyBean LedgerService ledgerService;
   @MockitoSpyBean OutboxRepository outbox;
+
+  @Value("${outbox.worker.max-attempts}")
+  int maxAttempts;
 
   @BeforeEach
   @AfterEach
@@ -124,8 +130,8 @@ class LedgerEventWorkerTest {
   }
 
   @Test
-  void emptyQueueReturnsFalseAndZero() {
-    assertThat(worker.processNext()).isFalse();
+  void emptyQueueReturnsNoneAndZero() {
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.NONE);
     assertThat(worker.processBatch(10)).isZero();
   }
 
@@ -150,7 +156,7 @@ class LedgerEventWorkerTest {
     var older = paymentService.create("user-1", 1050L, "key-2");
     makeOldest(older.id());
 
-    assertThat(worker.processNext()).isTrue();
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.PROCESSED);
 
     assertProcessed(older.id());
     assertThat(processedCount()).isEqualTo(1L);
@@ -160,15 +166,17 @@ class LedgerEventWorkerTest {
 
   @Test
   void applyFailureLeavesEventUnprocessed() {
-    paymentService.create("user-1", 1050L, "key-1");
+    var payment = paymentService.create("user-1", 1050L, "key-1");
     var failure = new IllegalStateException("Ledger unavailable");
     doThrow(failure).when(ledgerService).apply(any());
 
-    assertThatThrownBy(worker::processNext).isSameAs(failure);
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.FAILED);
 
     assertThat(ledgerEntries()).isEmpty();
     assertThat(processedCount()).isZero();
     verify(outbox, never()).markProcessed(any(), any());
+    assertFailure(payment.id(), 1);
+    assertThat(retryState(payment.id()).lastError()).contains("Ledger unavailable");
   }
 
   @Test
@@ -177,12 +185,13 @@ class LedgerEventWorkerTest {
     var failure = new DataAccessResourceFailureException("Cannot mark event processed");
     doThrow(failure).when(outbox).markProcessed(any(), any());
 
-    assertThatThrownBy(worker::processNext).isSameAs(failure);
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.FAILED);
 
     assertThat(ledgerEntries()).isEmpty();
     assertThat(processedCount()).isZero();
+    assertFailure(payment.id(), 1);
     doCallRealMethod().when(outbox).markProcessed(any(), any());
-    assertThat(worker.processNext()).isTrue();
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.PROCESSED);
     assertThat(ledgerEntries()).hasSize(1);
     assertProcessed(payment.id());
   }
@@ -196,11 +205,12 @@ class LedgerEventWorkerTest {
     var failure = new DataAccessResourceFailureException("Second event failed");
     doThrow(failure).when(outbox).markProcessed(eq(secondEventId), any());
 
-    assertThatThrownBy(() -> worker.processBatch(10)).isSameAs(failure);
+    assertThat(worker.processBatch(10)).isEqualTo(1);
 
     assertThat(ledgerEntries()).extracting(LedgerEntry::paymentId).containsExactly(first.id());
     assertProcessed(first.id());
     assertThat(processedCount()).isEqualTo(1L);
+    assertFailure(second.id(), 1);
     doCallRealMethod().when(outbox).markProcessed(eq(secondEventId), any());
     assertThat(worker.processBatch(10)).isEqualTo(1);
     assertThat(ledgerEntries()).hasSize(2);
@@ -214,9 +224,12 @@ class LedgerEventWorkerTest {
     try (var executor = Executors.newSingleThreadExecutor()) {
       transactionTemplate.executeWithoutResult(
           transaction -> {
-            var locked = outbox.claimNext().orElseThrow();
+            var locked = outbox.claimNext(maxAttempts).orElseThrow();
             var otherWorker = executor.submit(worker::processNext);
-            assertThatCode(() -> assertThat(otherWorker.get(10, TimeUnit.SECONDS)).isTrue())
+            assertThatCode(
+                    () ->
+                        assertThat(otherWorker.get(10, TimeUnit.SECONDS))
+                            .isEqualTo(ProcessResult.PROCESSED))
                 .doesNotThrowAnyException();
             assertThat(ledgerEntries())
                 .singleElement()
@@ -225,8 +238,8 @@ class LedgerEventWorkerTest {
           });
     }
 
-    assertThat(worker.processNext()).isTrue();
-    assertThat(worker.processNext()).isFalse();
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.PROCESSED);
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.NONE);
     assertThat(ledgerEntries()).hasSize(2);
     assertThat(processedCount()).isEqualTo(2L);
   }
@@ -239,6 +252,146 @@ class LedgerEventWorkerTest {
 
     assertThat(ledgerEntries()).hasSize(1);
     assertProcessed(payment.id());
+  }
+
+  @Test
+  void retriesOnLaterBatchAndRecovers() {
+    var payment = paymentService.create("user-1", 1050L, "key-1");
+    var event = eventFor(payment.id());
+    doThrow(new IllegalStateException("Temporary ledger failure"))
+        .doCallRealMethod()
+        .when(ledgerService)
+        .apply(any());
+
+    assertThat(worker.processBatch(10)).isZero();
+
+    assertFailure(payment.id(), 1);
+    assertThat(retryState(payment.id()).lastError()).contains("Temporary ledger failure");
+    assertThat(ledgerEntries()).isEmpty();
+    verify(ledgerService, times(1)).apply(event);
+
+    assertThat(worker.processBatch(10)).isEqualTo(1);
+
+    assertProcessed(payment.id());
+    assertThat(ledgerEntries()).hasSize(1);
+    assertThat(retryState(payment.id()).attempts()).isEqualTo(1);
+    verify(ledgerService, times(2)).apply(event);
+  }
+
+  @Test
+  void parksEventAtConfiguredAttemptLimit() {
+    var payment = paymentService.create("user-1", 1050L, "key-1");
+    var event = eventFor(payment.id());
+    doThrow(new IllegalStateException("Persistent ledger failure"))
+        .when(ledgerService)
+        .apply(any());
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      assertThat(worker.processBatch(10)).isZero();
+      assertFailure(payment.id(), attempt);
+    }
+
+    assertThat(worker.processBatch(10)).isZero();
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.NONE);
+    assertFailure(payment.id(), maxAttempts);
+    assertThat(ledgerEntries()).isEmpty();
+    verify(ledgerService, times(maxAttempts)).apply(event);
+  }
+
+  @Test
+  void freshEventPassesOlderFailingEventOnNextPoll() {
+    var failing = paymentService.create("user-1", 1050L, "key-1");
+    var healthy = paymentService.create("user-1", 1050L, "key-2");
+    makeOldest(failing.id());
+    var badEvent = eventFor(failing.id());
+    doThrow(new IllegalStateException("Only this event fails")).when(ledgerService).apply(badEvent);
+
+    assertThat(worker.processBatch(10)).isZero();
+    assertFailure(failing.id(), 1);
+    assertThat(ledgerEntries()).isEmpty();
+
+    assertThat(worker.processBatch(10)).isEqualTo(1);
+
+    assertProcessed(healthy.id());
+    assertFailure(failing.id(), 2);
+    assertThat(ledgerEntries()).extracting(LedgerEntry::paymentId).containsExactly(healthy.id());
+    verify(ledgerService, times(2)).apply(badEvent);
+  }
+
+  @Test
+  void malformedPayloadIsCountedAndParkedUsingRowId() {
+    var payment = paymentService.create("user-1", 1050L, "key-1");
+    UUID eventId = eventFor(payment.id()).eventId();
+    jdbcClient
+        .sql("UPDATE payment_events SET payload = '{\"bogus\": true}' WHERE id = :id")
+        .param("id", eventId)
+        .update();
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      assertThat(worker.processBatch(10)).isZero();
+      assertFailure(payment.id(), attempt);
+    }
+
+    assertThat(worker.processBatch(10)).isZero();
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.NONE);
+    assertThat(ledgerEntries()).isEmpty();
+    verify(outbox, times(maxAttempts)).recordFailure(eq(eventId), any());
+    verify(outbox, never()).markProcessed(any(), any());
+  }
+
+  @Test
+  void truncatesStoredErrorMessage() {
+    var payment = paymentService.create("user-1", 1050L, "key-1");
+    doThrow(new IllegalStateException("x".repeat(2000))).when(ledgerService).apply(any());
+
+    assertThat(worker.processNext()).isEqualTo(ProcessResult.FAILED);
+
+    assertFailure(payment.id(), 1);
+    assertThat(retryState(payment.id()).lastError())
+        .hasSize(1000)
+        .startsWith("IllegalStateException: ");
+  }
+
+  @Test
+  void pollDoesNotThrowForEventFailure() {
+    var payment = paymentService.create("user-1", 1050L, "key-1");
+    doThrow(new IllegalStateException("Ledger unavailable")).when(ledgerService).apply(any());
+
+    assertThatCode(worker::poll).doesNotThrowAnyException();
+
+    assertFailure(payment.id(), 1);
+  }
+
+  @Test
+  void claimFailurePropagatesWithoutAttributingItToAnEvent() {
+    var failure = new DataAccessResourceFailureException("Database unavailable");
+    doThrow(failure).when(outbox).claimNext(maxAttempts);
+
+    assertThatThrownBy(worker::processNext).isSameAs(failure);
+
+    verify(outbox, never()).recordFailure(any(), any());
+  }
+
+  private record RetryState(int attempts, String lastError, OffsetDateTime processedAt) {}
+
+  private RetryState retryState(UUID paymentId) {
+    return jdbcClient
+        .sql("SELECT attempts, last_error, processed_at FROM payment_events WHERE payment_id = :id")
+        .param("id", paymentId)
+        .query(
+            (rs, rowNum) ->
+                new RetryState(
+                    rs.getInt("attempts"),
+                    rs.getString("last_error"),
+                    rs.getObject("processed_at", OffsetDateTime.class)))
+        .single();
+  }
+
+  private void assertFailure(UUID paymentId, int attempts) {
+    var state = retryState(paymentId);
+    assertThat(state.attempts()).isEqualTo(attempts);
+    assertThat(state.lastError()).isNotBlank();
+    assertThat(state.processedAt()).isNull();
   }
 
   private PaymentEvent eventFor(UUID paymentId) {
