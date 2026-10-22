@@ -8,10 +8,12 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.nielsen.domain.IdempotencyKeyConflictException;
 import com.nielsen.domain.Payment;
 import com.nielsen.domain.PaymentStatus;
 import com.nielsen.services.PaymentService;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
@@ -57,6 +59,80 @@ public class PaymentsControllerTest {
     assertThat(result).bodyJson().extractingPath("$.amount").isEqualTo(1050);
     assertThat(result).bodyJson().extractingPath("$.status").isEqualTo("PENDING");
     assertThat(result).bodyJson().extractingPath("$.createdAt").isEqualTo("2026-10-21T12:00:00Z");
+  }
+
+  @Test
+  void rejectsConflictingIdempotencyKey() {
+    when(paymentServiceMock.create("user-1", 1050L, "key-1"))
+        .thenThrow(new IdempotencyKeyConflictException());
+
+    var result =
+        mvc.post()
+            .uri("/payments")
+            .header("Idempotency-Key", "key-1")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(VALID_BODY)
+            .exchange();
+
+    assertThat(result)
+        .hasStatus(HttpStatus.CONFLICT)
+        .hasContentType(MediaType.APPLICATION_PROBLEM_JSON);
+    assertThat(result).bodyJson().extractingPath("$.status").isEqualTo(409);
+    assertThat(result)
+        .bodyJson()
+        .extractingPath("$.detail")
+        .isEqualTo("Idempotency key has already been used for a different payment request.");
+  }
+
+  @Test
+  void returnsNotFoundForUnknownPayment() {
+    UUID id = UUID.randomUUID();
+    when(paymentServiceMock.findById(id)).thenReturn(Optional.empty());
+
+    assertThat(mvc.get().uri("/payments/{id}", id))
+        .hasStatus(HttpStatus.NOT_FOUND)
+        .hasContentType(MediaType.APPLICATION_PROBLEM_JSON);
+    verify(paymentServiceMock).findById(id);
+  }
+
+  @Test
+  void getsExistingPayment() {
+    UUID id = UUID.randomUUID();
+    Instant createdAt = Instant.parse("2026-10-21T12:00:00Z");
+    var payment =
+        new Payment(id, "user-1", 1050L, PaymentStatus.SUCCEEDED, createdAt, "key-1", createdAt);
+    when(paymentServiceMock.findById(id)).thenReturn(Optional.of(payment));
+
+    var result = mvc.get().uri("/payments/{id}", id).exchange();
+
+    assertThat(result).hasStatus(HttpStatus.OK);
+    assertThat(result).bodyJson().extractingPath("$.id").isEqualTo(id.toString());
+    assertThat(result).bodyJson().extractingPath("$.userId").isEqualTo("user-1");
+    assertThat(result).bodyJson().extractingPath("$.amount").isEqualTo(1050);
+    assertThat(result).bodyJson().extractingPath("$.status").isEqualTo("SUCCEEDED");
+    assertThat(result).bodyJson().extractingPath("$.createdAt").isEqualTo("2026-10-21T12:00:00Z");
+  }
+
+  @Test
+  void replayReturnsCreatedWithCurrentPayment() {
+    UUID id = UUID.randomUUID();
+    Instant createdAt = Instant.parse("2026-10-21T12:00:00Z");
+    when(paymentServiceMock.create("user-1", 1050L, "key-1"))
+        .thenReturn(
+            new Payment(
+                id, "user-1", 1050L, PaymentStatus.SUCCEEDED, createdAt, "key-1", createdAt));
+
+    var result =
+        mvc.post()
+            .uri("/payments")
+            .header("Idempotency-Key", "key-1")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(VALID_BODY)
+            .exchange();
+
+    assertThat(result).hasStatus(HttpStatus.CREATED);
+    assertThat(result).bodyJson().extractingPath("$.id").isEqualTo(id.toString());
+    assertThat(result).bodyJson().extractingPath("$.status").isEqualTo("SUCCEEDED");
   }
 
   @Test

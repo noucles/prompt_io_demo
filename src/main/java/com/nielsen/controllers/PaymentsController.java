@@ -1,16 +1,17 @@
 package com.nielsen.controllers;
 
-import com.nielsen.domain.PaymentStatus;
+import com.nielsen.domain.IdempotencyKeyConflictException;
 import com.nielsen.dto.CreatePaymentRequest;
 import com.nielsen.dto.PaymentResponse;
 import com.nielsen.services.PaymentService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
-import java.time.Instant;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -18,6 +19,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/payments")
@@ -41,7 +43,14 @@ public class PaymentsController {
 
   @GetMapping("/{id}")
   public PaymentResponse getPayment(@PathVariable UUID id) {
-    return new PaymentResponse(
-        UUID.randomUUID(), "userId", 123L, PaymentStatus.SUCCEEDED, Instant.now());
+    return paymentService
+        .findById(id)
+        .map(PaymentResponse::from)
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+  }
+
+  @ExceptionHandler(IdempotencyKeyConflictException.class)
+  public ProblemDetail handleIdempotencyKeyConflict(IdempotencyKeyConflictException exception) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, exception.getMessage());
   }
 }
